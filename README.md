@@ -61,9 +61,9 @@ Struts 1.xのJSPカスタムタグを現代的なJSTL/EL式に変換するツー
 
 ## 使用方法
 
-1. JSPファイルを`A`ディレクトリに配置
+1. JSPファイルを`test`ディレクトリに配置
 2. `java StrutsConverter`を実行
-3. 変換結果が`A_after`ディレクトリに出力されます
+3. 変換結果が`test_result`ディレクトリに出力されます
 
 ## 技術的特徴
 
