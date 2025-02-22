@@ -1,5 +1,3 @@
-package com.example;
-
 import java.nio.file.*;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -1730,6 +1728,7 @@ class HtmlRadioConverter implements TagConverter {
             : str.substring(0, 1).toUpperCase() + str.substring(1);
     }
 }
+
 class LogicGreaterEqualConverter extends LogicComparisonConverter {
     public LogicGreaterEqualConverter() {
         super("greaterEqual");

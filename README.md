@@ -1,40 +1,15 @@
 # Struts Tag Converter
 
-Struts Tag Converterは、Struts 1.xのJSPカスタムタグを現代的なJSTL/EL式に変換するツールです。
+Struts 1.xのJSPカスタムタグを現代的なJSTL/EL式に変換するツールです。
 
-## 機能
+## 概要
 
-- Struts 1.xのカスタムタグをJSTL/EL式に変換
-- 以下のタグをサポート：
-  - `html:*` タグ（text, button, radio, select など）
-  - `logic:*` タグ（equal, notEqual, iterate など）
-  - `bean:*` タグ（define, write）
-- タグライブラリ宣言の自動削除
-- JSTLコアタグライブラリの自動追加
+レガシーシステムのモダナイゼーションを支援するツールとして開発しました。
+以下のような変換に対応しています：
 
-## 必要要件
-
-- Java 11以上
-- Maven 3.6以上
-
-## インストール
-
-```bash
-git clone https://github.com/yourusername/struts-tag-converter.git
-cd struts-tag-converter
-mvn clean install
-```
-
-## 使用方法
-
-1. 変換したいJSPファイルを`A`ディレクトリに配置
-2. 以下のコマンドを実行：
-
-```bash
-java -jar target/struts-tag-converter-1.0-SNAPSHOT-jar-with-dependencies.jar
-```
-
-3. 変換されたファイルが`A_after`ディレクトリに出力されます
+- `html:*` タグ → 標準的なHTML要素
+- `logic:*` タグ → JSTL条件分岐・繰り返し
+- `bean:*` タグ → EL式
 
 ## 変換例
 
@@ -48,48 +23,18 @@ java -jar target/struts-tag-converter-1.0-SNAPSHOT-jar-with-dependencies.jar
 <input type="text" name="username" value="${form.username}" class="form-control"/>
 ```
 
-より多くの例は`examples`ディレクトリを参照してください。
+## 使用方法
 
-## 開発者向け情報
+1. JSPファイルを`A`ディレクトリに配置
+2. `java StrutsConverter`を実行
+3. 変換結果が`A_after`ディレクトリに出力されます
 
-### プロジェクト構造
+## 技術スタック
 
-```
-src/
-├── main/
-│   └── java/
-│       └── com/
-│           └── example/
-│               ├── StrutsConverter.java
-│               ├── converters/
-│               └── model/
-└── test/
-    └── java/
-        └── com/
-            └── example/
-                └── StrutsConverterTest.java
-```
-
-### ビルド方法
-
-```bash
-mvn clean package
-```
-
-### テストの実行
-
-```bash
-mvn test
-```
+- Java
+- 正規表現によるパターンマッチング
+- ビルダーパターンの実装
 
 ## ライセンス
 
 MITライセンス
-
-## 貢献
-
-1. このリポジトリをフォーク
-2. 新しいブランチを作成 (`git checkout -b feature/amazing-feature`)
-3. 変更をコミット (`git commit -m 'Add some amazing feature'`)
-4. ブランチにプッシュ (`git push origin feature/amazing-feature`)
-5. プルリクエストを作成
