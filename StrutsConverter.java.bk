@@ -1,0 +1,1853 @@
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+
+public class StrutsConverter {
+    private static final String INPUT_DIR = "A";  // 入力ディレクトリを"A"に変更
+    private static final String JSTL_CORE_TAGLIB = 
+        "<%@ taglib uri=\"http://java.sun.com/jsp/jstl/core\" prefix=\"c\" %>";
+    
+    private final List<TagConverter> converters = new ArrayList<>();
+    private final List<TaglibRemover> taglibRemovers = new ArrayList<>();
+    
+    public StrutsConverter() {
+        converters.add(new BeanDefineConverter());
+        converters.add(new BeanWriteConverter());
+        converters.add(new HtmlHiddenConverter());
+        converters.add(new HtmlTextConverter());
+        converters.add(new HtmlButtonConverter());
+        converters.add(new HtmlSelectConverter());
+        converters.add(new LogicEqualConverter());
+        converters.add(new LogicNotEqualConverter());
+        converters.add(new LogicIterateConverter());
+        converters.add(new NestedTagConverter());
+        
+        taglibRemovers.add(new StrutsTaglibRemover("html"));
+        taglibRemovers.add(new StrutsTaglibRemover("logic"));
+        taglibRemovers.add(new StrutsTaglibRemover("bean"));
+    }
+    
+    public static void main(String[] args) {
+        StrutsConverter converter = new StrutsConverter();
+        try {
+            converter.convertDirectory();
+        } catch (IOException e) {
+            System.err.println("ディレクトリ処理中にエラーが発生しました: " + e.getMessage());
+        }
+    }
+    
+    public void convertDirectory() throws IOException {
+        Path rootDir = Paths.get(INPUT_DIR);
+        if (!Files.exists(rootDir)) {
+            System.err.println("ディレクトリ '" + INPUT_DIR + "' が見つかりません。");
+            return;
+        }
+
+        // ディレクトリを再帰的に処理
+        try (Stream<Path> paths = Files.walk(rootDir)) {
+            paths.filter(Files::isRegularFile)  // 通常のファイルのみを処理
+                 .filter(path -> path.toString().toLowerCase().endsWith(".jsp"))  // JSPファイルのみを処理
+                 .forEach(path -> {
+                     try {
+                         convertFile(path);
+                     } catch (IOException e) {
+                         System.err.println("ファイル処理中にエラーが発生しました: " + path + " - " + e.getMessage());
+                     }
+                 });
+        }
+    }
+    
+    private void convertFile(Path inputPath) throws IOException {
+    System.out.println("処理中のファイル: " + inputPath);
+    
+    // ファイルの内容を読み込む際に文字エンコーディングを明示的に指定
+    String content = Files.readString(inputPath, StandardCharsets.UTF_8);
+    
+    // 改行コードを統一（Macの \r をWindowsの \r\n に変換）
+    content = content.replace("\r", "\r\n").replace("\r\n\r\n", "\r\n");
+    
+    // 変換結果を保存するリスト
+    List<ConversionResult> results = new ArrayList<>();
+    
+    // タグの変換
+    for (TagConverter converter : converters) {
+        content = converter.convert(content, results);
+    }
+
+    // JSTL core タグの使用チェック
+    boolean needsJstlCore = content.contains("<c:if") || content.contains("<c:forEach");
+    
+    // タグライブラリの削除
+    for (TaglibRemover remover : taglibRemovers) {
+        content = remover.remove(content);
+    }
+    
+    if (needsJstlCore) {
+        Pattern taglibPattern = Pattern.compile("<%@\\s*taglib.*?%>");
+        Matcher matcher = taglibPattern.matcher(content);
+        int lastTaglibEnd = -1;
+        while (matcher.find()) {
+            lastTaglibEnd = matcher.end();
+        }
+        
+        if (lastTaglibEnd != -1) {
+            content = content.substring(0, lastTaglibEnd) + 
+                     "\r\n" + JSTL_CORE_TAGLIB + content.substring(lastTaglibEnd);
+        } else {
+            content = JSTL_CORE_TAGLIB + "\r\n" + content;
+        }
+    }
+    
+    // 明示的な文字エンコーディングと改行コードを指定して書き込み
+    Files.writeString(inputPath, content, StandardCharsets.UTF_8, 
+        StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+    
+    // 変換結果のログ出力
+    System.out.println("変換完了: " + inputPath);
+    results.forEach(System.out::println);
+    
+    if (needsJstlCore) {
+        System.out.println("JSTL Core タグライブラリの宣言が追加されました。");
+    }
+    System.out.println("-------------------");
+}
+}
+
+interface TagConverter {
+    String convert(String content, List<ConversionResult> results);
+}
+
+interface TaglibRemover {
+    String remove(String content);
+}
+
+class StrutsTaglibRemover implements TaglibRemover {
+    private final Pattern pattern;
+    
+    public StrutsTaglibRemover(String prefix) {
+        this.pattern = Pattern.compile("<%@\\s*taglib\\s*uri=\"/WEB-INF/struts-" + prefix + "\\.tld\"\\s*prefix=\"" + prefix + "\"\\s*%>\\R?");
+    }
+    
+    @Override
+    public String remove(String content) {
+        return pattern.matcher(content).replaceAll("");
+    }
+}
+
+class ConversionResult {
+    private final String tagType;
+    private final String originalTag;
+    private final String convertedExpression;
+    
+    public ConversionResult(String tagType, String originalTag, String convertedExpression) {
+        this.tagType = tagType;
+        this.originalTag = originalTag;
+        this.convertedExpression = convertedExpression;
+    }
+    
+    @Override
+    public String toString() {
+        return String.format("変換: %s\n  元のタグ: %s\n  変換後: %s",
+                tagType, originalTag, convertedExpression);
+    }
+}
+class NestedTagConverter implements TagConverter {
+    private static final Pattern NESTED_PATTERN = Pattern.compile(
+        "(<logic:iterate\\s*[^>]*>)([\\s\\S]*?)(</logic:iterate>)|" +
+        "(<logic:equal\\s*[^>]*>)([\\s\\S]*?)(</logic:equal>)|" +
+        "(<logic:notEqual\\s*[^>]*>)([\\s\\S]*?)(</logic:notEqual>)",
+        Pattern.DOTALL
+    );
+
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        Matcher matcher = NESTED_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (matcher.find()) {
+            String startTag = matcher.group(1) != null ? matcher.group(1) : 
+                            (matcher.group(4) != null ? matcher.group(4) : matcher.group(7));
+            String body = matcher.group(2) != null ? matcher.group(2) : 
+                         (matcher.group(5) != null ? matcher.group(5) : matcher.group(8));
+            
+            String convertedTag;
+            if (startTag.startsWith("<logic:iterate")) {
+                convertedTag = convertIterateTag(startTag, body);
+            } else if (startTag.startsWith("<logic:equal")) {
+                convertedTag = convertEqualTag(startTag, body, false);
+            } else {
+                convertedTag = convertEqualTag(startTag, body, true);
+            }
+            
+            matcher.appendReplacement(result, Matcher.quoteReplacement(convertedTag));
+        } 
+        matcher.appendTail(result);
+        return result.toString();
+    }
+    
+    private String convertIterateTag(String startTag, String body) {
+        Pattern attrPattern = Pattern.compile("(\\w+)=\"([^\"]*)\"");
+        Matcher attrMatcher = attrPattern.matcher(startTag);
+        
+        String id = null;
+        String name = null;
+        String property = null;
+        String scope = null;
+        String offset = null;
+        String length = null;
+        String indexId = null;
+        String collection = null;
+        
+        while (attrMatcher.find()) {
+            String attrName = attrMatcher.group(1);
+            String attrValue = attrMatcher.group(2);
+            
+            switch (attrName) {
+                case "id": id = attrValue; break;
+                case "name": name = attrValue; break;
+                case "property": property = attrValue; break;
+                case "scope": scope = attrValue; break;
+                case "offset": offset = attrValue; break;
+                case "length": length = attrValue; break;
+                case "indexId": indexId = attrValue; break;
+                case "collection": collection = attrValue; break;
+            }
+        }
+        
+        StringBuilder newTag = new StringBuilder("<c:forEach");
+        
+        if (id != null) {
+            newTag.append(" var=\"").append(id).append("\"");
+        }
+        
+        newTag.append(" items=\"${");
+        if (collection != null) {
+            newTag.append(NameConverter.convertDotToUnderscore(collection));
+        } else {
+            if (scope != null) {
+                newTag.append(getScopePrefix(scope));
+            }
+            if (name != null) {
+                newTag.append(NameConverter.convertDotToUnderscore(name));
+                if (property != null) {
+                    newTag.append(".get").append(capitalize(property)).append("()");
+                }
+            }
+        }
+        newTag.append("}\"");
+        
+        // varStatus attribute (formerly indexId)
+        if (indexId != null) {
+            newTag.append(" varStatus=\"").append(indexId).append("\"");
+        }
+        
+        // offset and length
+        if (offset != null) {
+            newTag.append(" begin=\"").append(offset).append("\"");
+        }
+        if (length != null) {
+            int end = Integer.parseInt(offset != null ? offset : "0") + 
+                     Integer.parseInt(length) - 1;
+            newTag.append(" end=\"").append(end).append("\"");
+        }
+        
+        newTag.append(">");
+        newTag.append(body);
+        newTag.append("</c:forEach>");
+        
+        return newTag.toString();
+    }
+    
+    private String convertEqualTag(String startTag, String body, boolean isNotEqual) {
+        Pattern attrPattern = Pattern.compile("(\\w+)=\"([^\"]*)\"");
+        Matcher attrMatcher = attrPattern.matcher(startTag);
+        
+        String name = null;
+        String property = null;
+        String value = null;
+        
+        while (attrMatcher.find()) {
+            String attrName = attrMatcher.group(1);
+            String attrValue = attrMatcher.group(2);
+            
+            switch (attrName) {
+                case "name": name = attrValue; break;
+                case "property": property = attrValue; break;
+                case "value": value = attrValue; break;
+            }
+        }
+        
+        StringBuilder newTag = new StringBuilder("<c:if test=\"${");
+        
+        if (name != null) {
+            newTag.append(NameConverter.convertDotToUnderscore(name));
+            if (property != null) {
+                newTag.append(".get").append(capitalize(property)).append("()");
+            }
+        }
+        
+        newTag.append(" ").append(isNotEqual ? "!=" : "==").append(" '")
+              .append(value).append("'}\">");
+        newTag.append(body);
+        newTag.append("</c:if>");
+        
+        return newTag.toString();
+    }
+    
+    private String getScopePrefix(String scope) {
+        switch (scope.toLowerCase()) {
+            case "application": return "applicationScope.";
+            case "session": return "sessionScope.";
+            case "request": return "requestScope.";
+            case "page": return "pageScope.";
+            default: return "";
+        }
+    }
+    
+    private String capitalize(String str) {
+        return str == null || str.isEmpty() ? str 
+            : str.substring(0, 1).toUpperCase() + str.substring(1);
+    }
+}
+
+class LogicIterateConverter implements TagConverter {
+    private static final Pattern START_PATTERN = Pattern.compile(
+        "<logic:iterate\\s*([^>]*?)>",
+        Pattern.DOTALL  // Enable multiline matching
+    );
+    private static final Pattern END_PATTERN = Pattern.compile(
+        "</logic:iterate>");
+    private static final Pattern JSP_EXPRESSION_PATTERN = Pattern.compile(
+        "<%=\\s*(\\w+)\\s*\\+\\s*(\\d+)\\s*%>");
+    
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        // First convert JSP expressions
+        content = convertJspExpressions(content, results);
+        
+        // Then handle the iterate tags
+        Matcher startMatcher = START_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (startMatcher.find()) {
+            String attributes = startMatcher.group(1).trim();
+            attributes = normalizeAttributes(attributes);
+            IterateAttributes attrs = parseAttributes(attributes);
+            String convertedStart = createForEachTag(attrs);
+            
+            results.add(new ConversionResult(
+                "logic:iterate (開始タグ)",
+                startMatcher.group(0),
+                convertedStart
+            ));
+            
+            startMatcher.appendReplacement(result, 
+                Matcher.quoteReplacement(convertedStart));
+        }
+        startMatcher.appendTail(result);
+        content = result.toString();
+        
+        // Convert end tags
+        Matcher endMatcher = END_PATTERN.matcher(content);
+        result = new StringBuffer();
+        
+        while (endMatcher.find()) {
+            results.add(new ConversionResult(
+                "logic:iterate (閉じタグ)",
+                endMatcher.group(0),
+                "</c:forEach>"
+            ));
+            
+            endMatcher.appendReplacement(result, "</c:forEach>");
+        }
+        endMatcher.appendTail(result);
+        
+        return result.toString();
+    }
+    
+    private String convertJspExpressions(String content, List<ConversionResult> results) {
+        Matcher exprMatcher = JSP_EXPRESSION_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (exprMatcher.find()) {
+            String varName = exprMatcher.group(1);
+            String number = exprMatcher.group(2);
+            String convertedExpr = String.format("${%s.index + %s}", varName, number);
+            
+            results.add(new ConversionResult(
+                "JSP Expression",
+                exprMatcher.group(0),
+                convertedExpr
+            ));
+            
+            exprMatcher.appendReplacement(result, 
+                Matcher.quoteReplacement(convertedExpr));
+        }
+        exprMatcher.appendTail(result);
+        return result.toString();
+    }
+    
+    private String normalizeAttributes(String attributes) {
+        // Normalize whitespace and line breaks
+        return attributes.replaceAll("\\s+", " ").trim();
+    }
+    
+    private IterateAttributes parseAttributes(String attributes) {
+        return new IterateAttributes.Builder()
+                .name(extractAttribute(attributes, "name"))
+                .property(extractAttribute(attributes, "property"))
+                .id(extractAttribute(attributes, "id"))
+                .indexId(extractAttribute(attributes, "indexId"))
+                .offset(extractAttribute(attributes, "offset"))
+                .length(extractAttribute(attributes, "length"))
+                .collection(extractAttribute(attributes, "collection"))
+                .scope(extractAttribute(attributes, "scope"))
+                .build();
+    }
+    
+    private String extractAttribute(String attributes, String attributeName) {
+        Pattern pattern = Pattern.compile(
+            attributeName + "\\s*=\\s*\"([^\"]*?)\"",
+            Pattern.DOTALL
+        );
+        Matcher matcher = pattern.matcher(attributes);
+        return matcher.find() ? matcher.group(1).trim() : null;
+    }
+    
+    private String createForEachTag(IterateAttributes attrs) {
+        StringBuilder tag = new StringBuilder("<c:forEach");
+        
+        if (attrs.getId() != null) {
+            tag.append(" var=\"").append(attrs.getId()).append("\"");
+        }
+        
+        tag.append(" items=\"${");
+        if (attrs.getCollection() != null) {
+            tag.append(NameConverter.convertDotToUnderscore(attrs.getCollection()));
+        } else {
+            if (attrs.getScope() != null && attrs.getName() != null) {
+                tag.append(getScopePrefix(attrs.getScope()));
+            }
+            if (attrs.getName() != null) {
+                tag.append(NameConverter.convertDotToUnderscore(attrs.getName()));
+                if (attrs.getProperty() != null) {
+                    tag.append(".get").append(capitalize(attrs.getProperty())).append("()");
+                }
+            }
+        }
+        tag.append("}\"");
+        
+        if (attrs.getIndexId() != null) {
+            tag.append(" varStatus=\"").append(attrs.getIndexId()).append("\"");
+        }
+        
+        if (attrs.getOffset() != null) {
+            tag.append(" begin=\"").append(attrs.getOffset()).append("\"");
+        }
+        
+        if (attrs.getLength() != null) {
+            int end;
+            if (attrs.getOffset() != null) {
+                end = Integer.parseInt(attrs.getOffset()) + 
+                      Integer.parseInt(attrs.getLength()) - 1;
+            } else {
+                end = Integer.parseInt(attrs.getLength()) - 1;
+            }
+            tag.append(" end=\"").append(end).append("\"");
+        }
+        
+        tag.append(">");
+        return tag.toString();
+    }
+    
+    private String getScopePrefix(String scope) {
+        switch (scope.toLowerCase()) {
+            case "application": return "applicationScope.";
+            case "session": return "sessionScope.";
+            case "request": return "requestScope.";
+            case "page": return "pageScope.";
+            default: return "";
+        }
+    }
+    
+    private String capitalize(String str) {
+        return str == null || str.isEmpty() ? str 
+            : str.substring(0, 1).toUpperCase() + str.substring(1);
+    }
+}
+
+class IterateAttributes {
+    private final String name;
+    private final String property;
+    private final String id;
+    private final String indexId;
+    private final String offset;
+    private final String length;
+    private final String collection;
+    private final String scope;
+    
+    private IterateAttributes(Builder builder) {
+        this.name = builder.name;
+        this.property = builder.property;
+        this.id = builder.id;
+        this.indexId = builder.indexId;
+        this.offset = builder.offset;
+        this.length = builder.length;
+        this.collection = builder.collection;
+        this.scope = builder.scope;
+    }
+    
+    public String getName() { return name; }
+    public String getProperty() { return property; }
+    public String getId() { return id; }
+    public String getIndexId() { return indexId; }
+    public String getOffset() { return offset; }
+    public String getLength() { return length; }
+    public String getCollection() { return collection; }
+    public String getScope() { return scope; }
+    
+    public static class Builder {
+        private String name;
+        private String property;
+        private String id;
+        private String indexId;
+        private String offset;
+        private String length;
+        private String collection;
+        private String scope;
+        
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+        
+        public Builder property(String property) {
+            this.property = property;
+            return this;
+        }
+        
+        public Builder id(String id) {
+            this.id = id;
+            return this;
+        }
+        
+        public Builder indexId(String indexId) {
+            this.indexId = indexId;
+            return this;
+        }
+        
+        public Builder offset(String offset) {
+            this.offset = offset;
+            return this;
+        }
+        
+        public Builder length(String length) {
+            this.length = length;
+            return this;
+        }
+        
+        public Builder collection(String collection) {
+            this.collection = collection;
+            return this;
+        }
+        
+        public Builder scope(String scope) {
+            this.scope = scope;
+            return this;
+        }
+        
+        public IterateAttributes build() {
+            return new IterateAttributes(this);
+        }
+    }
+}
+abstract class LogicComparisonConverter implements TagConverter {
+    private final String tagName;
+
+    protected LogicComparisonConverter(String tagName) {
+        this.tagName = tagName;
+    }
+
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        // 開始タグを処理
+        Pattern startPattern = Pattern.compile(
+            "<logic:" + tagName + "\\s+([^>]*?)>");
+        
+        // 閉じタグを処理
+        Pattern endPattern = Pattern.compile(
+            "</logic:" + tagName + ">");
+        
+        // 開始タグの変換
+        Matcher startMatcher = startPattern.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (startMatcher.find()) {
+            String attributes = startMatcher.group(1).trim();
+            LogicComparison comparison = parseComparison(attributes);
+            
+            String convertedStart = String.format("<c:if test=\"%s\">",
+                comparison.buildCondition(getOperator()));
+                
+            results.add(new ConversionResult("logic:" + tagName + " (開始タグ)", 
+                startMatcher.group(0), convertedStart));
+                
+            startMatcher.appendReplacement(result, 
+                Matcher.quoteReplacement(convertedStart));
+        }
+        startMatcher.appendTail(result);
+        content = result.toString();
+        
+        // 閉じタグの変換
+        Matcher endMatcher = endPattern.matcher(content);
+        result = new StringBuffer();
+        
+        while (endMatcher.find()) {
+            results.add(new ConversionResult("logic:" + tagName + " (閉じタグ)", 
+                endMatcher.group(0), "</c:if>"));
+                
+            endMatcher.appendReplacement(result, "</c:if>");
+        }
+        endMatcher.appendTail(result);
+        
+        return result.toString();
+    }
+    
+    protected abstract String getOperator();
+    
+    private LogicComparison parseComparison(String attributes) {
+        return new LogicComparison.Builder()
+                .name(extractAttribute(attributes, "name"))
+                .property(extractAttribute(attributes, "property"))
+                .value(extractAttribute(attributes, "value"))
+                .scope(extractAttribute(attributes, "scope"))
+                .build();
+    }
+    
+    private String extractAttribute(String attributes, String attributeName) {
+        Pattern pattern = Pattern.compile(attributeName + "\\s*=\\s*\"(.*?)\"");
+        Matcher matcher = pattern.matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+}
+
+class LogicEqualConverter extends LogicComparisonConverter {
+    public LogicEqualConverter() {
+        super("equal");
+    }
+    
+    @Override
+    protected String getOperator() {
+        return "==";
+    }
+}
+
+class LogicNotEqualConverter extends LogicComparisonConverter {
+    public LogicNotEqualConverter() {
+        super("notEqual");
+    }
+    
+    @Override
+    protected String getOperator() {
+        return "!=";
+    }
+}
+
+class LogicComparison {
+    private final String name;
+    private final String property;
+    private final String value;
+    private final String scope;
+
+    private LogicComparison(Builder builder) {
+        this.name = builder.name;
+        this.property = builder.property;
+        this.value = builder.value;
+        this.scope = builder.scope;
+    }
+
+    public String buildCondition(String operator) {
+        StringBuilder condition = new StringBuilder("${");
+        
+        if (name != null) {
+            if (scope != null) {
+                switch (scope.toLowerCase()) {
+                    case "application":
+                        condition.append("applicationScope.");
+                        break;
+                    case "session":
+                        condition.append("sessionScope.");
+                        break;
+                    case "request":
+                        condition.append("requestScope.");
+                        break;
+                    case "page":
+                        condition.append("pageScope.");
+                        break;
+                }
+            }
+            
+            condition.append(NameConverter.convertDotToUnderscore(name));
+            
+            if (property != null) {
+                condition.append(".get")
+                        .append(capitalize(property))
+                        .append("()");
+            }
+        }
+        
+        condition.append(" ").append(operator).append(" '")
+                .append(value).append("'");
+        condition.append("}");
+        
+        return condition.toString();
+    }
+
+    private static String capitalize(String str) {
+        return str == null || str.isEmpty() ? str 
+            : str.substring(0, 1).toUpperCase() + str.substring(1);
+    }
+
+    public static class Builder {
+        private String name;
+        private String property;
+        private String value;
+        private String scope;
+
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+
+        public Builder property(String property) {
+            this.property = property;
+            return this;
+        }
+
+        public Builder value(String value) {
+            this.value = value;
+            return this;
+        }
+
+        public Builder scope(String scope) {
+            this.scope = scope;
+            return this;
+        }
+
+        public LogicComparison build() {
+            return new LogicComparison(this);
+        }
+    }
+}
+
+class BeanWriteConverter implements TagConverter {
+    private static final Pattern BEAN_WRITE_PATTERN = Pattern.compile("(?s)<bean:write(.*?)/?>");
+    
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        Matcher matcher = BEAN_WRITE_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (matcher.find()) {
+            String attributes = matcher.group(1).trim().replaceAll("[\n\r]+\\s*", " ");
+            BeanWrite beanWrite = parseBeanWrite(attributes);
+            String convertedEl = beanWrite.toEl();
+            results.add(new ConversionResult("bean:write", matcher.group(0), convertedEl));
+            matcher.appendReplacement(result, Matcher.quoteReplacement(convertedEl));
+        }
+        
+        matcher.appendTail(result);
+        return result.toString();
+    }
+    
+    private BeanWrite parseBeanWrite(String attributes) {
+        return new BeanWrite.Builder()
+                .name(extractAttribute(attributes, "name"))
+                .property(extractAttribute(attributes, "property"))
+                .scope(extractAttribute(attributes, "scope"))
+                .filter(extractAttribute(attributes, "filter"))
+                .ignore(extractAttribute(attributes, "ignore"))
+                .formatKey(extractAttribute(attributes, "formatKey"))
+                .format(extractAttribute(attributes, "format"))
+                .locale(extractAttribute(attributes, "locale"))
+                .bundle(extractAttribute(attributes, "bundle"))
+                .build();
+    }
+    
+    private String extractAttribute(String attributes, String attributeName) {
+        Pattern pattern = Pattern.compile(attributeName + "\\s*=\\s*\"(.*?)\"");
+        Matcher matcher = pattern.matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+}
+
+class BeanWrite {
+    private final String name;
+    private final String property;
+    private final String scope;
+    private final Boolean filter;
+    private final Boolean ignore;
+    private final String formatKey;
+    private final String format;
+    private final String locale;
+    private final String bundle;
+
+    private BeanWrite(Builder builder) {
+        this.name = builder.name;
+        this.property = builder.property;
+        this.scope = builder.scope;
+        this.filter = builder.filter;
+        this.ignore = builder.ignore;
+        this.formatKey = builder.formatKey;
+        this.format = builder.format;
+        this.locale = builder.locale;
+        this.bundle = builder.bundle;
+    }
+
+    public String toEl() {
+        StringBuilder expression = new StringBuilder();
+        String value = buildValueExpression();
+        
+        // フォーマット処理の適用
+        if (format != null || formatKey != null) {
+            value = applyFormatting(value);
+            return value;
+        }
+        
+        // filter属性が明示的に指定されている場合はc:outを使用
+        if (filter != null && filter == true) {
+            expression.append("<c:out value=\"").append(value).append("\"");
+            
+            // filter属性の値に基づいてescapeXmlを設定
+            expression.append(" escapeXml=\"").append(filter).append("\"");
+            
+            // ignore属性の処理
+            if (ignore != null && ignore) {
+                expression.append(" default=\"\"");
+            }
+            
+            expression.append(" />");
+            return expression.toString();
+        }
+        
+        // filter属性が未指定の場合は単純なEL式を出力
+        return value;
+    }
+    
+    private String buildValueExpression() {
+        StringBuilder value = new StringBuilder("${");
+        
+        if (name != null) {
+            if (scope != null) {
+                switch (scope.toLowerCase()) {
+                    case "application":
+                        value.append("applicationScope.");
+                        break;
+                    case "session":
+                        value.append("sessionScope.");
+                        break;
+                    case "request":
+                        value.append("requestScope.");
+                        break;
+                    case "page":
+                        value.append("pageScope.");
+                        break;
+                }
+            }
+            
+            value.append(NameConverter.convertDotToUnderscore(name));
+            
+            if (property != null) {
+                value.append(".get")
+                     .append(capitalize(property))
+                     .append("()");
+            }
+        }
+        
+        value.append("}");
+        return value.toString();
+    }
+    
+    private String applyFormatting(String value) {
+        StringBuilder formatted = new StringBuilder();
+        
+        // fmt:formatDateやfmt:formatNumberを使用したフォーマット処理
+        if (format != null || formatKey != null) {
+            // 日付フォーマット
+            if (isDateFormat()) {
+                formatted.append("<fmt:formatDate value=\"")
+                        .append(value)
+                        .append("\" pattern=\"")
+                        .append(format != null ? format : formatKey)
+                        .append("\"");
+                
+                if (locale != null) {
+                    formatted.append(" locale=\"").append(locale).append("\"");
+                }
+                
+                formatted.append(" />");
+            }
+            // 数値フォーマット
+            else if (isNumberFormat()) {
+                formatted.append("<fmt:formatNumber value=\"")
+                        .append(value)
+                        .append("\" pattern=\"")
+                        .append(format != null ? format : formatKey)
+                        .append("\"");
+                
+                if (locale != null) {
+                    formatted.append(" locale=\"").append(locale).append("\"");
+                }
+                
+                formatted.append(" />");
+            }
+            // その他のフォーマット
+            else {
+                formatted.append(value);
+            }
+        } else {
+            formatted.append(value);
+        }
+        
+        return formatted.toString();
+    }
+    
+    private boolean isDateFormat() {
+        if (format != null) {
+            return format.contains("y") || format.contains("M") || 
+                   format.contains("d") || format.contains("H") || 
+                   format.contains("m") || format.contains("s");
+        }
+        return false;
+    }
+    
+    private boolean isNumberFormat() {
+        if (format != null) {
+            return format.contains("#") || format.contains("0") || 
+                   format.contains(".") || format.contains(",");
+        }
+        return false;
+    }
+
+    private static String capitalize(String str) {
+        return str == null || str.isEmpty() ? str 
+            : str.substring(0, 1).toUpperCase() + str.substring(1);
+    }
+
+    public static class Builder {
+        private String name;
+        private String property;
+        private String scope;
+        private Boolean filter;
+        private Boolean ignore;
+        private String formatKey;
+        private String format;
+        private String locale;
+        private String bundle;
+
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+
+        public Builder property(String property) {
+            this.property = property;
+            return this;
+        }
+
+        public Builder scope(String scope) {
+            this.scope = scope;
+            return this;
+        }
+
+        public Builder filter(String filter) {
+            if (filter != null) {
+                this.filter = Boolean.parseBoolean(filter);
+            }
+            return this;
+        }
+
+        public Builder ignore(String ignore) {
+            if (ignore != null) {
+                this.ignore = Boolean.parseBoolean(ignore);
+            }
+            return this;
+        }
+
+        public Builder formatKey(String formatKey) {
+            this.formatKey = formatKey;
+            return this;
+        }
+
+        public Builder format(String format) {
+            this.format = format;
+            return this;
+        }
+
+        public Builder locale(String locale) {
+            this.locale = locale;
+            return this;
+        }
+
+        public Builder bundle(String bundle) {
+            this.bundle = bundle;
+            return this;
+        }
+
+        public BeanWrite build() {
+            return new BeanWrite(this);
+        }
+    }
+}
+
+class HtmlTextConverter implements TagConverter {
+    private static final Pattern HTML_TEXT_PATTERN = Pattern.compile("(?s)<html:text(.*?)/?>");
+    
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        Matcher matcher = HTML_TEXT_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (matcher.find()) {
+            String attributes = matcher.group(1).trim().replaceAll("[\n\r]+\\s*", " ");
+            HtmlText htmlText = parseHtmlText(attributes);
+            String convertedHtml = htmlText.toJstl();
+            results.add(new ConversionResult("html:text", matcher.group(0), convertedHtml));
+            matcher.appendReplacement(result, Matcher.quoteReplacement(convertedHtml));
+        }
+        
+        matcher.appendTail(result);
+        return result.toString();
+    }
+    
+    private HtmlText parseHtmlText(String attributes) {
+        return new HtmlText.Builder()
+                .imBoard(extractAttribute(attributes, "im_board"))
+                .imPosition(extractAttribute(attributes, "im_position"))
+                .name(extractAttribute(attributes, "name"))
+                .property(extractAttribute(attributes, "property"))
+                .styleId(extractAttribute(attributes, "styleId"))
+                .maxLength(extractAttribute(attributes, "maxlength"))
+                .styleClass(extractAttribute(attributes, "styleClass"))
+                .size(extractAttribute(attributes, "size"))
+                .onblur(extractAttribute(attributes, "onblur"))
+                .disabled(extractAttribute(attributes, "disabled"))  
+                .build();
+    }
+    
+    private String extractAttribute(String attributes, String attributeName) {
+        Pattern pattern = Pattern.compile(attributeName + "\\s*=\\s*\"(.*?)\"");
+        Matcher matcher = pattern.matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+}
+
+class HtmlText {
+    private final String imBoard;
+    private final String imPosition;
+    private final String name;
+    private final String property;
+    private final String styleId;
+    private final String maxLength;
+    private final String styleClass;
+    private final String size;
+    private final String onblur;
+    private final String disabled;
+
+    private HtmlText(Builder builder) {
+        this.imBoard = builder.imBoard;
+        this.imPosition = builder.imPosition;
+        this.name = builder.name;
+        this.property = builder.property;
+        this.styleId = builder.styleId;
+        this.maxLength = builder.maxLength;
+        this.styleClass = builder.styleClass;
+        this.size = builder.size;
+        this.onblur = builder.onblur;
+        this.disabled = builder.disabled;
+    }
+
+    public String toJstl() {
+        StringBuilder html = new StringBuilder("<input type=\"text\"");
+        
+        // 新しい属性を追加（指定された順序で出力）
+        if (imBoard != null) {
+            html.append(" im_board=\"").append(imBoard).append("\"");
+        }
+        
+        if (imPosition != null) {
+            html.append(" im_position=\"").append(imPosition).append("\"");
+        }
+        
+        if (property != null) {
+            html.append(" name=\"").append(property).append("\"");
+        }
+        
+        if (name != null && property != null) {
+            html.append(" value=\"${");
+            html.append(NameConverter.convertDotToUnderscore(name))
+                .append(".get")
+                .append(capitalize(property))
+                .append("()")
+                .append("}\"");
+        }
+        
+        if (size != null) {
+            html.append(" size=\"").append(size).append("\"");
+        }
+        
+        if (styleId != null) {
+            html.append(" id=\"").append(styleId).append("\"");
+        }
+        
+        if (maxLength != null) {
+            html.append(" maxlength=\"").append(maxLength).append("\"");
+        }
+        
+        if (styleClass != null) {
+            html.append(" class=\"").append(styleClass).append("\"");
+        }
+
+        if (onblur != null) {                                     // 追加
+            html.append(" onblur=\"").append(onblur).append("\"");
+        }
+
+        if (disabled != null && Boolean.parseBoolean(disabled)) { // 追加
+            html.append(" disabled");
+        }
+        
+        html.append(">");
+        return html.toString();
+    }
+
+    private static String capitalize(String str) {
+        return str == null || str.isEmpty() ? str 
+            : str.substring(0, 1).toUpperCase() + str.substring(1);
+    }
+
+    public static class Builder {
+        private String imBoard;
+        private String imPosition;
+        private String name;
+        private String property;
+        private String styleId;
+        private String maxLength;
+        private String styleClass;
+        private String size;
+        private String onblur;
+        private String disabled;
+
+        public Builder imBoard(String imBoard) { 
+            this.imBoard = imBoard;
+            return this;
+        }
+
+        public Builder imPosition(String imPosition) { 
+            this.imPosition = imPosition;
+            return this;
+        }
+
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+
+        public Builder property(String property) {
+            this.property = property;
+            return this;
+        }
+
+        public Builder styleId(String styleId) {
+            this.styleId = styleId;
+            return this;
+        }
+
+        public Builder maxLength(String maxLength) {
+            this.maxLength = maxLength;
+            return this;
+        }
+
+        public Builder styleClass(String styleClass) {
+            this.styleClass = styleClass;
+            return this;
+        }
+
+        public Builder size(String size) {
+            this.size = size;
+            return this;
+        }
+
+        public Builder onblur(String onblur) {
+            this.onblur = onblur;
+            return this;
+        }
+
+        public Builder disabled(String disabled) {
+            this.disabled = disabled;
+            return this;
+        }
+
+        public HtmlText build() {
+            return new HtmlText(this);
+        }
+    }
+}
+
+class HtmlButtonConverter implements TagConverter {
+    private static final Pattern HTML_BUTTON_PATTERN = Pattern.compile(
+        "<html:button\\s*([^>]*?)(/>|>(.*?)</html:button>|>)",
+        Pattern.DOTALL
+    );
+    
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        Matcher matcher = HTML_BUTTON_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (matcher.find()) {
+            String attributes = matcher.group(1).trim();
+            String endTag = matcher.group(2);
+            String buttonText = null;
+            
+            // 通常の開始・終了タグペアの場合
+            if (endTag != null && endTag.startsWith(">") && matcher.group(3) != null) {
+                buttonText = matcher.group(3).trim();
+            }
+            
+            HtmlButton htmlButton = parseHtmlButton(attributes, buttonText);
+            String convertedHtml = htmlButton.toJstl();
+            
+            results.add(new ConversionResult(
+                "html:button",
+                matcher.group(0),
+                convertedHtml
+            ));
+            
+            matcher.appendReplacement(result, Matcher.quoteReplacement(convertedHtml));
+        }
+        
+        matcher.appendTail(result);
+        return result.toString();
+    }
+    
+    private HtmlButton parseHtmlButton(String attributes, String buttonText) {
+        return new HtmlButton.Builder()
+                .name(extractAttribute(attributes, "property"))
+                .value(extractAttribute(attributes, "value"))
+                .styleClass(extractAttribute(attributes, "styleClass"))
+                .onclick(extractAttribute(attributes, "onclick"))
+                .buttonText(buttonText)
+                .build();
+    }
+    
+    private String extractAttribute(String attributes, String attributeName) {
+        Pattern pattern = Pattern.compile(
+            attributeName + "\\s*=\\s*[\"'](.*?)[\"']",
+            Pattern.DOTALL
+        );
+        Matcher matcher = pattern.matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+}
+
+class HtmlButton {
+    private final String name;
+    private final String value;
+    private final String styleClass;
+    private final String onclick;
+    private final String buttonText;
+
+    private HtmlButton(Builder builder) {
+        this.name = builder.name;
+        this.value = builder.value;
+        this.styleClass = builder.styleClass;
+        this.onclick = builder.onclick;
+        this.buttonText = builder.buttonText;
+    }
+
+    public String toJstl() {
+        StringBuilder html = new StringBuilder("<input type=\"button\"");
+        
+        // 指定された順序で属性を出力
+        if (name != null) {
+            html.append(" name=\"").append(name).append("\"");
+        }
+        
+        if (styleClass != null) {
+            html.append(" class=\"").append(styleClass).append("\"");
+        }
+        
+        if (onclick != null) {
+            html.append(" onclick=\"").append(onclick).append("\"");
+        }
+        
+        // valueの設定（buttonTextが存在する場合はそちらを優先）
+        if (buttonText != null && !buttonText.trim().isEmpty()) {
+            html.append(" value=\"").append(buttonText.trim()).append("\"");
+        } else if (value != null) {
+            html.append(" value=\"").append(value).append("\"");
+        }
+        
+        // input要素は自己終了タグ
+        html.append(">");
+        return html.toString();
+    }
+
+    public static class Builder {
+        private String name;
+        private String value;
+        private String styleClass;
+        private String onclick;
+        private String buttonText;
+
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+
+        public Builder value(String value) {
+            this.value = value;
+            return this;
+        }
+
+        public Builder styleClass(String styleClass) {
+            this.styleClass = styleClass;
+            return this;
+        }
+
+        public Builder onclick(String onclick) {
+            this.onclick = onclick;
+            return this;
+        }
+
+        public Builder buttonText(String buttonText) {
+            this.buttonText = buttonText;
+            return this;
+        }
+
+        public HtmlButton build() {
+            return new HtmlButton(this);
+        }
+    }
+}
+
+class BeanDefineConverter implements TagConverter {
+    private static final Pattern BEAN_DEFINE_PATTERN = Pattern.compile("(?s)<bean:define\\s*(.*?)/?>");
+    
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        Matcher matcher = BEAN_DEFINE_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (matcher.find()) {
+            String attributes = matcher.group(1).trim().replaceAll("[\n\r]+\\s*", " ");
+            BeanDefine beanDefine = parseBeanDefine(attributes);
+            String convertedTag = beanDefine.toJstl();
+            results.add(new ConversionResult("bean:define", matcher.group(0), convertedTag));
+            matcher.appendReplacement(result, Matcher.quoteReplacement(convertedTag));
+        }
+        
+        matcher.appendTail(result);
+        return result.toString();
+    }
+    
+    private BeanDefine parseBeanDefine(String attributes) {
+        return new BeanDefine.Builder()
+                .id(extractAttribute(attributes, "id"))
+                .name(extractAttribute(attributes, "name"))
+                .property(extractAttribute(attributes, "property"))
+                .scope(extractAttribute(attributes, "scope"))
+                .toScope(extractAttribute(attributes, "toScope"))
+                .value(extractAttribute(attributes, "value"))
+                .build();
+    }
+    
+    private String extractAttribute(String attributes, String attributeName) {
+        Pattern pattern = Pattern.compile(attributeName + "\\s*=\\s*\"(.*?)\"");
+        Matcher matcher = pattern.matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+}
+
+class BeanDefine {
+    private final String id;
+    private final String name;
+    private final String property;
+    private final String scope;
+    private final String toScope;
+    private final String value;
+
+    private BeanDefine(Builder builder) {
+        this.id = builder.id;
+        this.name = builder.name;
+        this.property = builder.property;
+        this.scope = builder.scope;
+        this.toScope = builder.toScope;
+        this.value = builder.value;
+    }
+
+    public String toJstl() {
+        StringBuilder jstl = new StringBuilder("<c:set");
+        
+        if (id != null) {
+            jstl.append(" var=\"").append(id).append("\"");
+        }
+        
+        if (toScope != null) {
+            jstl.append(" scope=\"").append(toScope.toLowerCase()).append("\"");
+        }
+        
+        jstl.append(" value=\"${");
+        if (value != null) {
+            jstl.append(value);
+        } else if (name != null) {
+            if (scope != null) {
+                switch (scope.toLowerCase()) {
+                    case "application":
+                        jstl.append("applicationScope.");
+                        break;
+                    case "session":
+                        jstl.append("sessionScope.");
+                        break;
+                    case "request":
+                        jstl.append("requestScope.");
+                        break;
+                    case "page":
+                        jstl.append("pageScope.");
+                        break;
+                }
+            }
+            
+            jstl.append(NameConverter.convertDotToUnderscore(name));
+            if (property != null) {
+                jstl.append(".get")
+                    .append(capitalize(property))
+                    .append("()");
+            }
+        }
+        jstl.append("}\" />");
+        
+        return jstl.toString();
+    }
+
+    private static String capitalize(String str) {
+        return str == null || str.isEmpty() ? str 
+            : str.substring(0, 1).toUpperCase() + str.substring(1);
+    }
+
+    public static class Builder {
+        private String id;
+        private String name;
+        private String property;
+        private String scope;
+        private String toScope;
+        private String value;
+
+        public Builder id(String id) {
+            this.id = id;
+            return this;
+        }
+
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+
+        public Builder property(String property) {
+            this.property = property;
+            return this;
+        }
+
+        public Builder scope(String scope) {
+            this.scope = scope;
+            return this;
+        }
+
+        public Builder toScope(String toScope) {
+            this.toScope = toScope;
+            return this;
+        }
+
+        public Builder value(String value) {
+            this.value = value;
+            return this;
+        }
+
+        public BeanDefine build() {
+            return new BeanDefine(this);
+        }
+    }
+}
+
+class HtmlHiddenConverter implements TagConverter {
+    private static final Pattern HTML_HIDDEN_PATTERN = Pattern.compile("(?s)<html:hidden(.*?)/?>");
+    
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        Matcher matcher = HTML_HIDDEN_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (matcher.find()) {
+            String attributes = matcher.group(1).trim().replaceAll("[\n\r]+\\s*", " ");
+            HtmlHidden htmlHidden = parseHtmlHidden(attributes);
+            String convertedHtml = htmlHidden.toJstl();
+            results.add(new ConversionResult("html:hidden", matcher.group(0), convertedHtml));
+            matcher.appendReplacement(result, Matcher.quoteReplacement(convertedHtml));
+        }
+        
+        matcher.appendTail(result);
+        return result.toString();
+    }
+    
+    private HtmlHidden parseHtmlHidden(String attributes) {
+        return new HtmlHidden.Builder()
+                .name(extractAttribute(attributes, "name"))
+                .property(extractAttribute(attributes, "property"))
+                .build();
+    }
+    
+    private String extractAttribute(String attributes, String attributeName) {
+        Pattern pattern = Pattern.compile(attributeName + "\\s*=\\s*\"(.*?)\"");
+        Matcher matcher = pattern.matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+}
+
+class HtmlHidden {
+    private final String name;
+    private final String property;
+
+    private HtmlHidden(Builder builder) {
+        this.name = builder.name;
+        this.property = builder.property;
+    }
+
+    public String toJstl() {
+        StringBuilder html = new StringBuilder("<input type=\"hidden\"");
+        
+        if (property != null) {
+            html.append(" name=\"").append(property).append("\"");
+        }
+        
+        if (name != null && property != null) {
+            html.append(" value=\"${");
+            html.append(NameConverter.convertDotToUnderscore(name))
+                .append(".get")
+                .append(capitalize(property))
+                .append("()");
+            html.append("}\"");
+        }
+        
+        html.append(">");
+        return html.toString();
+    }
+    private static String capitalize(String str) {
+        return str == null || str.isEmpty() ? str 
+            : str.substring(0, 1).toUpperCase() + str.substring(1);
+    }
+
+    public static class Builder {
+        private String name;
+        private String property;
+
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+
+        public Builder property(String property) {
+            this.property = property;
+            return this;
+        }
+
+        public HtmlHidden build() {
+            return new HtmlHidden(this);
+        }
+    }
+}
+
+class HtmlSelectConverter implements TagConverter {
+    private static final Pattern HTML_SELECT_PATTERN = Pattern.compile(
+        "<html:select\\s*([^>]*?)>(.*?)</html:select>",
+        Pattern.DOTALL
+    );
+    
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        Matcher matcher = HTML_SELECT_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (matcher.find()) {
+            String attributes = matcher.group(1).trim();
+            String innerContent = matcher.group(2);
+            HtmlSelect htmlSelect = parseHtmlSelect(attributes);
+            
+            // 内部のoptionタグを変換（selectの属性情報を渡す）
+            String convertedInnerContent = convertInnerContent(
+                innerContent,
+                htmlSelect.getName(),
+                htmlSelect.getProperty()
+            );
+            
+            String convertedHtml = htmlSelect.toJstl(convertedInnerContent);
+            results.add(new ConversionResult("html:select", matcher.group(0), convertedHtml));
+            matcher.appendReplacement(result, Matcher.quoteReplacement(convertedHtml));
+        }
+        
+        matcher.appendTail(result);
+        return result.toString();
+    }
+    
+    private String convertInnerContent(String content, String selectName, String selectProperty) {
+        // option タグの変換を行う（selectの属性情報を渡す）
+        HtmlOptionConverter optionConverter = new HtmlOptionConverter(selectName, selectProperty);
+        return optionConverter.convert(content, new ArrayList<>());
+    }
+    
+    private HtmlSelect parseHtmlSelect(String attributes) {
+        return new HtmlSelect.Builder()
+                .name(extractAttribute(attributes, "name"))
+                .property(extractAttribute(attributes, "property"))
+                .styleClass(extractAttribute(attributes, "styleClass"))
+                .styleId(extractAttribute(attributes, "styleId"))
+                .build();
+    }
+    
+    private String extractAttribute(String attributes, String attributeName) {
+        Pattern pattern = Pattern.compile(attributeName + "\\s*=\\s*\"(.*?)\"");
+        Matcher matcher = pattern.matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+}
+
+class HtmlSelect {
+    private final String name;
+    private final String property;
+    private final String styleClass;
+    private final String styleId;
+    private final String onblur;
+    private final String style; 
+
+    private HtmlSelect(Builder builder) {
+        this.name = builder.name;
+        this.property = builder.property;
+        this.styleClass = builder.styleClass;
+        this.styleId = builder.styleId;
+        this.onblur = builder.onblur;
+        this.style = builder.style; 
+        
+    }
+
+    // Getter methods added
+    public String getName() { return name; }
+    public String getProperty() { return property; }
+
+    public String toJstl(String innerContent) {
+        StringBuilder html = new StringBuilder("<select");
+        
+        if (property != null) {
+            html.append(" name=\"").append(property).append("\"");
+        }
+        
+        if (styleClass != null) {
+            html.append(" class=\"").append(styleClass).append("\"");
+        }
+        
+        if (styleId != null) {
+            html.append(" id=\"").append(styleId).append("\"");
+        }
+
+        if (onblur != null) {
+            html.append(" onblur=\"").append(onblur).append("\"");
+        }
+        
+        if (style != null) {
+            html.append(" style=\"").append(style).append("\"");
+        }
+        
+        html.append(">");
+        html.append(innerContent);
+        html.append("</select>");
+        
+        return html.toString();
+    }
+
+    public static class Builder {
+        private String name;
+        private String property;
+        private String styleClass;
+        private String styleId;
+        private String onblur;
+        private String style;
+
+        public Builder name(String name) {
+            this.name = name;
+            return this;
+        }
+
+        public Builder property(String property) {
+            this.property = property;
+            return this;
+        }
+
+        public Builder styleClass(String styleClass) {
+            this.styleClass = styleClass;
+            return this;
+        }
+
+        public Builder styleId(String styleId) {
+            this.styleId = styleId;
+            return this;
+        }
+
+        public Builder onblur(String onblur) {
+            this.onblur = onblur;
+            return this;
+        }
+    
+        public Builder style(String style) {
+            this.style = style;
+            return this;
+        }
+    
+        public HtmlSelect build() {
+            return new HtmlSelect(this);
+        }
+    }
+}
+
+class HtmlOptionConverter implements TagConverter {
+    private static final Pattern HTML_OPTION_PATTERN = Pattern.compile(
+        "<html:option\\s*([^>]*?)(?:/>|>(.*?)</html:option>)",
+        Pattern.DOTALL
+    );
+    
+    private final String selectName;
+    private final String selectProperty;
+    
+    public HtmlOptionConverter(String selectName, String selectProperty) {
+        this.selectName = selectName;
+        this.selectProperty = selectProperty;
+    }
+    
+    @Override
+    public String convert(String content, List<ConversionResult> results) {
+        Matcher matcher = HTML_OPTION_PATTERN.matcher(content);
+        StringBuffer result = new StringBuffer();
+        
+        while (matcher.find()) {
+            String attributes = matcher.group(1).trim();
+            String value = extractAttribute(attributes, "value");
+            String text = matcher.group(2);
+            
+            // テキストが未設定の場合は value を使用
+            if (text == null || text.trim().isEmpty()) {
+                text = value;
+            }
+            
+            HtmlOption htmlOption = new HtmlOption.Builder()
+                .value(value)
+                .text(text)
+                .selectName(selectName)
+                .selectProperty(selectProperty)
+                .build();
+                
+            String convertedHtml = htmlOption.toJstl();
+            results.add(new ConversionResult("html:option", matcher.group(0), convertedHtml));
+            matcher.appendReplacement(result, Matcher.quoteReplacement(convertedHtml));
+        }
+        
+        matcher.appendTail(result);
+        return result.toString();
+    }
+    
+    private String extractAttribute(String attributes, String attributeName) {
+        Pattern pattern = Pattern.compile(attributeName + "\\s*=\\s*\"(.*?)\"");
+        Matcher matcher = pattern.matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+}
+
+class HtmlOption {
+    private final String value;
+    private final String text;
+    private final String selectName;
+    private final String selectProperty;
+
+    private HtmlOption(Builder builder) {
+        this.value = builder.value;
+        this.text = builder.text;
+        this.selectName = builder.selectName;
+        this.selectProperty = builder.selectProperty;
+    }
+
+    public String toJstl() {
+        StringBuilder html = new StringBuilder();
+        html.append("<option");
+        
+        if (value != null) {
+            html.append(" value=\"").append(value).append("\"");
+            
+            if (selectName != null && selectProperty != null) {
+                html.append(" ${ \"").append(value).append("\" == ")
+                    .append(NameConverter.convertDotToUnderscore(selectName))
+                    .append(".get")
+                    .append(capitalize(selectProperty))
+                    .append("() ? 'selected=\"selected\"' : '' }");
+            }
+        }
+        
+        html.append(">");
+        html.append(text != null && !text.trim().isEmpty() ? text.trim() : 
+                   (value != null ? value : ""));
+        html.append("</option>");
+        return html.toString();
+    }
+
+    private static String capitalize(String str) {
+        return str == null || str.isEmpty() ? str 
+            : str.substring(0, 1).toUpperCase() + str.substring(1);
+    }
+
+    public static class Builder {
+        private String value;
+        private String text;
+        private String selectName;
+        private String selectProperty;
+
+        public Builder value(String value) {
+            this.value = value;
+            return this;
+        }
+
+        public Builder text(String text) {
+            this.text = text;
+            return this;
+        }
+
+        public Builder selectName(String selectName) {
+            this.selectName = selectName;
+            return this;
+        }
+
+        public Builder selectProperty(String selectProperty) {
+            this.selectProperty = selectProperty;
+            return this;
+        }
+
+        public HtmlOption build() {
+            return new HtmlOption(this);
+        }
+    }
+}
+
+class NameConverter {
+    public static String convertDotToUnderscore(String name) {
+        return name != null ? name.replace('.', '_') : null;
+    }
+}
